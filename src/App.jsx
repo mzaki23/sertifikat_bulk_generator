@@ -31,6 +31,11 @@ function App() {
   const [csvData, setCsvData] = useState([]);
   const [headers, setHeaders] = useState([]);
   const [status, setStatus] = useState('');
+  // STATE BARU: Untuk fitur pencarian di tabel CSV
+  const [searchTerm, setSearchTerm] = useState('');
+  
+  const [csvUrl, setCsvUrl] = useState('');
+  const [isFetchingCsv, setIsFetchingCsv] = useState(false);
   
   const canvasRef = useRef(null);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
@@ -40,8 +45,30 @@ function App() {
     { id: Date.now(), colName: '', x: 0, y: 0, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000' }
   ]);
   const [activeFieldId, setActiveFieldId] = useState(fields[0].id);
+  // STATE BARU: Untuk fitur Preview 1 Sample PDF
+  const [previewPdfUrl, setPreviewPdfUrl] = useState(null);
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
 
-  // --- LOGIC FUNCTIONS (Tetap sama persis) ---
+  // --- LOGIC FUNGSI UTAMA ---
+
+  const handleClearAll = () => {
+    if (window.confirm("Yakin ingin menghapus semua file dan pengaturan?")) {
+      setTemplateFile(null);
+      setCsvData([]);
+      setHeaders([]);
+      setStatus('');
+      setCsvUrl(''); 
+      setPdfDimensions({ width: 0, height: 0 });
+      setCustomFonts([]);
+      
+      const resetField = { id: Date.now(), colName: '', x: 0, y: 0, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000' };
+      setFields([resetField]);
+      setActiveFieldId(resetField.id);
+      
+      document.querySelectorAll('input[type="file"]').forEach(input => input.value = '');
+    }
+  };
+
   const handleTemplateUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -97,6 +124,73 @@ function App() {
     });
   };
 
+  const handleFetchCsv = () => {
+    if (!csvUrl) return;
+    setIsFetchingCsv(true);
+    
+    Papa.parse(csvUrl, {
+      download: true,
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        setHeaders(results.meta.fields);
+        setCsvData(results.data);
+        if (results.meta.fields.length > 0) {
+          setFields(fields.map(f => ({ ...f, colName: results.meta.fields[0] })));
+        }
+        setIsFetchingCsv(false);
+        setStatus(`Live CSV berhasil dimuat! (${results.data.length} baris)`);
+        setTimeout(() => setStatus(''), 4000);
+      },
+      error: (err) => {
+        console.error(err);
+        alert("Gagal mengambil data. Pastikan URL valid dan merupakan format CSV.");
+        setIsFetchingCsv(false);
+      }
+    });
+  };
+
+  // Logic Tabel CSV
+  const handleCellChange = (rowIndex, column, value) => {
+    const newData = [...csvData];
+    newData[rowIndex] = { ...newData[rowIndex], [column]: value };
+    setCsvData(newData);
+  };
+
+  const handleAddRow = () => {
+    if (headers.length === 0) return;
+    const newRow = {};
+    headers.forEach(header => {
+      newRow[header] = ''; 
+    });
+    setCsvData([...csvData, newRow]);
+    
+    setTimeout(() => {
+      const tableContainer = document.getElementById('csv-table-container');
+      if (tableContainer) tableContainer.scrollTop = tableContainer.scrollHeight;
+    }, 100);
+  };
+
+  const handleDeleteRow = (indexToRemove) => {
+    // Tambahkan pengecekan jumlah baris di sini
+    if (csvData.length <= 1) {
+      alert("Tidak bisa dihapus! Minimal harus ada 1 baris data peserta.");
+      return; // Hentikan fungsi agar baris terakhir tidak terhapus
+    }
+    
+    setCsvData(prevData => prevData.filter((_, index) => index !== indexToRemove));
+  };
+
+  const handleExportCsv = () => {
+    if (csvData.length === 0) return;
+    const csvString = Papa.unparse(csvData);
+    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+    saveAs(blob, 'Data_Peserta_Updated.csv');
+    
+    setStatus('✅ CSV Berhasil disimpan!');
+    setTimeout(() => setStatus(''), 3000);
+  };
+
   const handleFontUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
@@ -110,6 +204,7 @@ function App() {
     if (newFonts.length > 0) updateField(activeFieldId, 'fontValue', newFonts[0].value);
   };
 
+  // Logic Manajemen Fields (Teks)
   const addField = () => {
     const newField = { 
       id: Date.now(), colName: headers[0] || '', 
@@ -162,6 +257,63 @@ function App() {
     e.target.value = null; 
   };
 
+  // --- FITUR BARU: Generate hanya 1 baris pertama untuk Preview ---
+  const handlePreviewSingle = async () => {
+    if (!templateFile || csvData.length === 0) return alert("Upload template & CSV dulu!");
+    setStatus('Membuat Preview...');
+    
+    try {
+      // Cari baris pertama yang datanya tidak kosong
+      const firstValidRow = csvData.find(row => row[fields[0]?.colName] && row[fields[0]?.colName].trim() !== '');
+      if (!firstValidRow) throw new Error("Tidak ada data peserta yang valid untuk di-preview.");
+
+      const templateArrayBuffer = await templateFile.arrayBuffer();
+      const pdfDoc = await PDFDocument.load(templateArrayBuffer);
+      pdfDoc.registerFontkit(fontkit);
+      const firstPage = pdfDoc.getPages()[0];
+      const embeddedFontsCache = {};
+
+      for (const field of fields) {
+        const textValue = firstValidRow[field.colName];
+        if (!textValue) continue;
+
+        let currentFont;
+        const isCustom = customFonts.find(f => f.value === field.fontValue);
+
+        if (isCustom) {
+          if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(isCustom.bytes);
+          currentFont = embeddedFontsCache[field.fontValue];
+        } else {
+          if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(field.fontValue);
+          currentFont = embeddedFontsCache[field.fontValue];
+        }
+
+        const textWidth = currentFont.widthOfTextAtSize(textValue, Number(field.size));
+        const finalX = Number(field.x) - (textWidth / 2);
+        const { r, g, b } = hexToRgbPdf(field.color);
+
+        firstPage.drawText(textValue, {
+          x: finalX, y: Number(field.y), size: Number(field.size),
+          font: currentFont, color: rgb(r, g, b),
+        });
+      }
+      
+      // Simpan PDF sebagai file sementara di memory browser (Blob)
+      const pdfBytes = await pdfDoc.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      
+      // Buka pop-up modal dan tampilkan PDF-nya
+      setPreviewPdfUrl(url);
+      setIsPreviewModalOpen(true);
+      setStatus('');
+    } catch (error) {
+      console.error(error);
+      setStatus('Error: ' + error.message);
+    }
+  };
+
+  // Logic Generate PDF Utama
   const generateCertificates = async () => {
     if (!templateFile || csvData.length === 0) return alert("Upload template & CSV dulu!");
     setStatus('Sedang Memproses...');
@@ -171,7 +323,11 @@ function App() {
     try {
       for (let i = 0; i < csvData.length; i++) {
         const row = csvData[i];
-        const primaryFileName = row[fields[0].colName] || `Sertifikat_${i+1}`; 
+        
+        // Lewati baris yang kosong (misal akibat klik 'Tambah Baris' tapi belum diisi)
+        if (!row[fields[0]?.colName] || row[fields[0]?.colName].trim() === '') continue;
+
+        const primaryFileName = row[fields[0]?.colName] || `Sertifikat_${i+1}`; 
         const pdfDoc = await PDFDocument.load(templateArrayBuffer);
         pdfDoc.registerFontkit(fontkit);
         const firstPage = pdfDoc.getPages()[0];
@@ -214,24 +370,43 @@ function App() {
     }
   };
 
+  // --- LOGIKA PENCARIAN (FIND) ---
+  // Kita sisipkan _originalIndex agar saat diedit/dihapus, data yang diubah tetap data aslinya
+  const filteredCsvData = csvData
+    .map((row, index) => ({ ...row, _originalIndex: index }))
+    .filter(row => {
+      if (!searchTerm) return true;
+      // Cek apakah ada nilai di kolom manapun yang cocok dengan kata kunci
+      return headers.some(h => 
+        String(row[h] || '').toLowerCase().includes(searchTerm.toLowerCase())
+      );
+    });
+
   // --- UI RENDERING ---
   return (
-    // Hapus pembatasan lebar, gunakan w-full agar 100% full width
     <div className="min-h-screen bg-slate-50 p-4 md:p-6 lg:p-8 font-sans text-slate-800 w-full overflow-x-hidden">
       
-      {/* Header Aplikasi - Full Width */}
-      <div className="w-full mb-6">
-        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Bulk Certificate App</h1>
-        <p className="text-slate-500 mt-1">Otomatisasi pembuatan sertifikat massal dengan mudah.</p>
+      {/* Header Aplikasi */}
+      <div className="w-full mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Bulk Certificate App</h1>
+          <p className="text-slate-500 mt-1">Otomatisasi pembuatan sertifikat massal dengan mudah.</p>
+        </div>
+        
+        <button 
+          onClick={handleClearAll} 
+          className="bg-rose-100 text-rose-600 px-4 py-2 rounded-lg font-bold hover:bg-rose-200 hover:text-rose-700 transition-colors flex items-center shadow-sm"
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          Bersihkan Semua
+        </button>
       </div>
 
-      {/* Grid Utama - Full Width */}
       <div className="w-full grid grid-cols-1 lg:grid-cols-12 2xl:grid-cols-12 gap-6 items-start">
         
-        {/* PANEL KIRI: Form & Config (Dibuat lebih proporsional untuk layar lebar) */}
+        {/* PANEL KIRI: Upload & Config */}
         <div className="lg:col-span-4 2xl:col-span-3 bg-white p-5 lg:p-6 rounded-2xl shadow-sm border border-slate-200">
           
-          {/* Section 1: Uploads */}
           <div className="space-y-4 mb-8 pb-6 border-b border-slate-100">
             <h2 className="font-bold text-lg text-slate-800 mb-2">1. Siapkan File</h2>
             <div>
@@ -239,19 +414,43 @@ function App() {
               <input type="file" accept="application/pdf" onChange={handleTemplateUpload} 
                 className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer border border-slate-200 rounded-lg"/>
             </div>
+            
             <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">Upload Data (CSV)</label>
+              <label className="block text-sm font-semibold text-slate-700 mb-1">Sumber Data Peserta (CSV)</label>
               <input type="file" accept=".csv" onChange={handleCsvUpload} 
-                className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer border border-slate-200 rounded-lg"/>
+                className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer border border-slate-200 rounded-lg mb-2"/>
+              
+              <div className="relative flex py-2 items-center">
+                <div className="flex-grow border-t border-slate-200"></div>
+                <span className="flex-shrink-0 mx-4 text-slate-400 text-xs font-bold uppercase">Atau URL Live</span>
+                <div className="flex-grow border-t border-slate-200"></div>
+              </div>
+
+              <div className="flex gap-2">
+                <input 
+                  type="url" 
+                  placeholder="Link Google Sheets CSV..." 
+                  value={csvUrl}
+                  onChange={(e) => setCsvUrl(e.target.value)}
+                  className="w-full p-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" 
+                />
+                <button 
+                  onClick={handleFetchCsv}
+                  disabled={isFetchingCsv || !csvUrl}
+                  className="bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:bg-slate-300 whitespace-nowrap transition-colors"
+                >
+                  {isFetchingCsv ? 'Menarik...' : 'Ambil Live'}
+                </button>
+              </div>
             </div>
+
             <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">Upload Font (.ttf/.otf)</label>
+              <label className="block text-sm font-semibold text-slate-700 mb-1 mt-4">Upload Font (.ttf/.otf)</label>
               <input type="file" accept=".ttf,.otf" multiple onChange={handleFontUpload} 
                 className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100 cursor-pointer border border-slate-200 rounded-lg"/>
             </div>
           </div>
 
-          {/* Section 2: Mapping Teks */}
           {headers.length > 0 && (
             <div className="mb-8">
               <div className="flex flex-col 2xl:flex-row justify-between 2xl:items-center mb-4 gap-3">
@@ -271,7 +470,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="space-y-4 max-h-[40vh] overflow-y-auto pr-2 custom-scrollbar">
                 {fields.map((field, index) => (
                   <div 
                     key={field.id} 
@@ -345,21 +544,28 @@ function App() {
             </div>
           )}
 
-          <div className="mt-6">
+          <div className="mt-6 flex flex-col xl:flex-row gap-3">
+            <button 
+              onClick={handlePreviewSingle} 
+              disabled={status === 'Sedang Memproses...' || status === 'Membuat Preview...' || !templateFile || csvData.length === 0} 
+              className="w-full xl:w-2/5 bg-blue-100 text-blue-700 py-4 rounded-xl font-bold text-lg hover:bg-blue-200 transition-all disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed shadow-sm flex justify-center items-center"
+            >
+              👁️ Preview 1 Sample
+            </button>
             <button 
               onClick={generateCertificates} 
-              disabled={status === 'Sedang Memproses...' || !templateFile || csvData.length === 0} 
-              className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-slate-800 transition-all disabled:bg-slate-300 disabled:cursor-not-allowed shadow-lg flex justify-center items-center"
+              disabled={status === 'Sedang Memproses...' || status === 'Membuat Preview...' || !templateFile || csvData.length === 0} 
+              className="w-full xl:w-3/5 bg-slate-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-slate-800 transition-all disabled:bg-slate-300 disabled:cursor-not-allowed shadow-lg flex justify-center items-center"
             >
               {status === 'Sedang Memproses...' ? 'Memproses...' : '🚀 Generate ZIP'}
             </button>
-            {status && status !== 'Sedang Memproses...' && (
-              <p className="mt-4 text-center text-sm font-semibold text-emerald-600 bg-emerald-50 py-2 rounded-lg border border-emerald-100">{status}</p>
-            )}
           </div>
+          {status && status !== 'Sedang Memproses...' && status !== 'Membuat Preview...' && (
+            <p className="mt-4 text-center text-sm font-semibold text-emerald-600 bg-emerald-50 py-2 rounded-lg border border-emerald-100">{status}</p>
+          )}
         </div>
 
-        {/* PANEL KANAN: Live Preview (Lebih luas) */}
+        {/* PANEL KANAN: Live Preview */}
         <div className="lg:col-span-8 2xl:col-span-9 bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center lg:sticky lg:top-8">
           
           <div className="w-full flex justify-between items-center mb-4">
@@ -367,7 +573,7 @@ function App() {
             {templateFile && <span className="text-xs font-semibold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100 shadow-sm animate-pulse">Klik area PDF untuk atur posisi</span>}
           </div>
 
-          <div className="relative border border-slate-200 rounded-xl bg-slate-100 overflow-hidden w-full flex justify-center items-center shadow-inner" style={{ minHeight: '600px' }}>
+          <div className="relative border border-slate-200 rounded-xl bg-slate-100 overflow-hidden w-full flex justify-center items-center shadow-inner" style={{ minHeight: '550px' }}>
             {!templateFile && (
               <div className="text-center p-6">
                 <svg className="mx-auto h-16 w-16 text-slate-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
@@ -414,8 +620,160 @@ function App() {
             </div>
           </div>
         </div>
-
       </div>
+
+      {/* --- PANEL BAWAH: Tabel CSV Editor --- */}
+      {csvData.length > 0 && (
+        <div className="w-full mt-6 bg-white p-5 lg:p-6 rounded-2xl shadow-sm border border-slate-200">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-4">
+            <h2 className="font-bold text-lg text-slate-800">Tabel Editor Data CSV ({csvData.length} baris)</h2>
+            
+            <div className="flex flex-col md:flex-row flex-wrap gap-3 w-full md:w-auto items-center">
+              
+              {/* --- FITUR BARU: Input Search (Find) --- */}
+              <div className="relative w-full md:w-64">
+                <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
+                  <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                </div>
+                <input 
+                  type="text" 
+                  placeholder="Cari data peserta..." 
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-slate-50 focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none transition-all shadow-sm"
+                />
+              </div>
+
+              <div className="flex gap-2 w-full md:w-auto">
+                <button 
+                  onClick={handleAddRow}
+                  className="bg-blue-100 text-blue-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-200 transition-colors flex items-center shadow-sm flex-1 md:flex-none justify-center"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                  Tambah Baris
+                </button>
+
+                <button 
+                  onClick={handleExportCsv}
+                  className="bg-emerald-100 text-emerald-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-200 transition-colors flex items-center shadow-sm flex-1 md:flex-none justify-center"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                  Simpan CSV
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div id="csv-table-container" className="overflow-x-auto max-h-[400px] custom-scrollbar border border-slate-200 rounded-lg scroll-smooth">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead className="bg-slate-100 sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="px-4 py-3 text-center font-bold text-slate-700 whitespace-nowrap w-12 border-r border-slate-200">No.</th>
+                  {headers.map((h, i) => (
+                    <th key={i} className="px-4 py-3 text-left font-bold text-slate-700 whitespace-nowrap">{h}</th>
+                  ))}
+                  <th className="px-4 py-3 text-center font-bold text-slate-700 whitespace-nowrap w-16">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-slate-100">
+                {/* --- UPDATE: Gunakan filteredCsvData, bukan csvData --- */}
+                {filteredCsvData.length > 0 ? (
+                  filteredCsvData.map((row, rowIndex) => (
+                    // Gunakan originalIndex sebagai patokan nomor dan handle action
+                    <tr key={row._originalIndex} className="hover:bg-slate-50 transition-colors group">
+                      <td className="px-4 py-2 text-slate-400 font-mono border-r border-slate-100 text-center">
+                        {row._originalIndex + 1}
+                      </td>
+                      
+                      {headers.map((h, colIndex) => (
+                        <td key={colIndex} className="p-0 border-r border-slate-100 relative min-w-[150px]">
+                          <input 
+                            type="text" 
+                            value={row[h] || ''} 
+                            // Pastikan mengirim row._originalIndex, bukan rowIndex urutan pencarian
+                            onChange={(e) => handleCellChange(row._originalIndex, h, e.target.value)}
+                            className="w-full h-full px-4 py-3 bg-transparent border-none outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white text-slate-700 transition-all"
+                            placeholder="Kosong..."
+                          />
+                        </td>
+                      ))}
+
+                      <td className="px-2 py-2 text-center align-middle border-l border-slate-100">
+                        <button 
+                          type="button"
+                          // Pastikan menghapus berdasarkan original index
+                          onClick={() => handleDeleteRow(row._originalIndex)}
+                          disabled={csvData.length <= 1}
+                          className={`p-2 rounded-lg transition-all ${
+                            csvData.length <= 1 
+                              ? 'text-slate-200 cursor-not-allowed'
+                              : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer'
+                          }`}
+                          title={csvData.length <= 1 ? "Minimal 1 baris data" : "Hapus baris ini"}
+                        >
+                          <svg className="w-5 h-5 mx-auto pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                          </svg>
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={headers.length + 2} className="px-4 py-8 text-center text-slate-500">
+                      Pencarian <b>"{searchTerm}"</b> tidak ditemukan.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs font-semibold text-slate-500 mt-4 flex items-center">
+            <svg className="w-4 h-4 mr-1 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Klik pada teks di dalam tabel untuk mengedit, tambah baris, hapus baris, atau gunakan fitur Cari untuk menemukan data.
+          </p>
+        </div>
+      )}
+
+{/* --- MODAL PREVIEW PDF ASLI --- */}
+      {isPreviewModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 md:p-8">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-full max-h-[90vh] flex flex-col overflow-hidden">
+            
+            {/* Header Modal */}
+            <div className="flex justify-between items-center p-4 border-b border-slate-200 bg-slate-50">
+              <h3 className="font-bold text-lg text-slate-800 flex items-center">
+                <svg className="w-5 h-5 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                Preview Hasil Akhir PDF (Baris Pertama)
+              </h3>
+              <button 
+                onClick={() => {
+                  setIsPreviewModalOpen(false);
+                  URL.revokeObjectURL(previewPdfUrl); // Bersihkan cache browser
+                  setPreviewPdfUrl(null);
+                }}
+                className="bg-rose-100 text-rose-600 hover:bg-rose-200 px-4 py-2 rounded-lg transition-colors font-bold text-sm"
+              >
+                Tutup Preview
+              </button>
+            </div>
+
+            {/* Area Penampil PDF */}
+            <div className="flex-grow w-full bg-slate-200 p-2 md:p-6 overflow-hidden">
+              {previewPdfUrl ? (
+                <iframe 
+                  src={`${previewPdfUrl}#toolbar=0&navpanes=0`} 
+                  className="w-full h-full rounded-xl border border-slate-300 shadow-sm bg-white"
+                  title="PDF Preview"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-slate-500 font-semibold">Memuat PDF...</div>
+              )}
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }
