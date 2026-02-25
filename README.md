@@ -43,6 +43,7 @@ To install the project, follow these steps:
 ```
 
 ## 📸 Screenshots
+<img src="preview.jpg"/>
 
 ## 🤝 Contributing
 Contributions are welcome! To contribute, please submit a pull request with a detailed description of the changes.
