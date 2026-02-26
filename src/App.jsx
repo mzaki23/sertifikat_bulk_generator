@@ -1,6 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Papa from 'papaparse';
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
@@ -31,512 +31,327 @@ function App() {
   const [csvData, setCsvData] = useState([]);
   const [headers, setHeaders] = useState([]);
   const [status, setStatus] = useState('');
-  // STATE BARU: Untuk fitur pencarian di tabel CSV
-  const [searchTerm, setSearchTerm] = useState('');
   
+  const [searchTerm, setSearchTerm] = useState('');
   const [csvUrl, setCsvUrl] = useState('');
   const [isFetchingCsv, setIsFetchingCsv] = useState(false);
+  
+  // FITUR BARU: Opsi Format Export (pdf, png, jpeg)
+  const [exportFormat, setExportFormat] = useState('pdf');
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
   
   const canvasRef = useRef(null);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
   const [customFonts, setCustomFonts] = useState([]);
 
   const [fields, setFields] = useState([
-    { id: Date.now(), colName: '', x: 0, y: 0, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000' }
+    { id: Date.now(), colName: '', x: 0, y: 0, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000', scaleX: 1, scaleY: 1, rotate: 0, lockRatio: true }
   ]);
   const [activeFieldId, setActiveFieldId] = useState(fields[0].id);
-  // STATE BARU: Untuk fitur Preview 1 Sample PDF
-  const [previewPdfUrl, setPreviewPdfUrl] = useState(null);
-  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
 
-  // --- LOGIC FUNGSI UTAMA ---
+  const [interaction, setInteraction] = useState({ mode: null, startX: 0, startY: 0, centerX: 0, centerY: 0, initialField: null });
 
-  const handleClearAll = () => {
-    if (window.confirm("Yakin ingin menghapus semua file dan pengaturan?")) {
-      setTemplateFile(null);
-      setCsvData([]);
-      setHeaders([]);
-      setStatus('');
-      setCsvUrl(''); 
-      setPdfDimensions({ width: 0, height: 0 });
-      setCustomFonts([]);
-      
-      const resetField = { id: Date.now(), colName: '', x: 0, y: 0, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000' };
-      setFields([resetField]);
-      setActiveFieldId(resetField.id);
-      
-      document.querySelectorAll('input[type="file"]').forEach(input => input.value = '');
+  // Event Listener Mouse untuk Transform di Canvas
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      if (!interaction.mode || !interaction.initialField) return;
+
+      const canvas = canvasRef.current;
+      const rect = canvas.getBoundingClientRect();
+      const scaleXRatio = canvas.width / rect.width;
+      const scaleYRatio = canvas.height / rect.height;
+
+      setFields(prevFields => prevFields.map(f => {
+        if (f.id === interaction.initialField.id) {
+          if (interaction.mode === 'move') {
+            const dx = (e.clientX - interaction.startX) * scaleXRatio;
+            const dy = (e.clientY - interaction.startY) * scaleYRatio;
+            return { ...f, x: Math.round(interaction.initialField.x + dx), y: Math.round(interaction.initialField.y - dy) };
+          }
+          if (interaction.mode === 'resize') {
+            const dx = e.clientX - interaction.startX;
+            const dy = e.clientY - interaction.startY;
+            let newScaleX = Math.max(0.1, interaction.initialField.scaleX + (dx / 100));
+            let newScaleY = Math.max(0.1, interaction.initialField.scaleY + (dy / 100));
+            if (f.lockRatio) newScaleY = newScaleX;
+            return { ...f, scaleX: Number(newScaleX.toFixed(2)), scaleY: Number(newScaleY.toFixed(2)) };
+          }
+          if (interaction.mode === 'rotate') {
+            const angleRad = Math.atan2(e.clientY - interaction.centerY, e.clientX - interaction.centerX);
+            let angleDeg = angleRad * (180 / Math.PI);
+            angleDeg = (angleDeg + 90) % 360;
+            return { ...f, rotate: Math.round(angleDeg) };
+          }
+        }
+        return f;
+      }));
+    };
+
+    const onMouseUp = () => setInteraction({ mode: null, startX: 0, startY: 0, centerX: 0, centerY: 0, initialField: null });
+
+    if (interaction.mode) {
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    } else {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [interaction]);
+
+  const onMouseDownMove = (e, field) => { e.stopPropagation(); e.preventDefault(); setActiveFieldId(field.id); setInteraction({ mode: 'move', startX: e.clientX, startY: e.clientY, initialField: { ...field } }); };
+  const onMouseDownResize = (e, field) => { e.stopPropagation(); e.preventDefault(); setActiveFieldId(field.id); setInteraction({ mode: 'resize', startX: e.clientX, startY: e.clientY, initialField: { ...field } }); };
+  const onMouseDownRotate = (e, field) => {
+    e.stopPropagation(); e.preventDefault(); setActiveFieldId(field.id);
+    const el = document.getElementById(`field-overlay-${field.id}`);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setInteraction({ mode: 'rotate', centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2, initialField: { ...field } });
     }
   };
 
   const handleTemplateUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const file = e.target.files[0]; if (!file) return;
     setTemplateFile(file);
-    const arrayBuffer = await file.arrayBuffer();
-    
-    try {
-      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-      const pdf = await loadingTask.promise;
-      const page = await pdf.getPage(1);
-      const viewport = page.getViewport({ scale: 1.0 });
-      setPdfDimensions({ width: viewport.width, height: viewport.height });
-
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-
-      await page.render({ canvasContext: context, viewport: viewport }).promise;
-      setFields(fields.map(f => ({ ...f, x: viewport.width / 2, y: viewport.height / 2 })));
-    } catch (error) {
-      console.error(error);
-      alert("Gagal membaca preview PDF.");
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          setPdfDimensions({ width: img.width, height: img.height });
+          const canvas = canvasRef.current;
+          const context = canvas.getContext('2d');
+          canvas.width = img.width; canvas.height = img.height;
+          context.drawImage(img, 0, 0);
+          setFields(fields.map(f => ({ ...f, x: img.width / 2, y: img.height / 2 })));
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    } else {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.0 });
+        setPdfDimensions({ width: viewport.width, height: viewport.height });
+        const canvas = canvasRef.current;
+        const context = canvas.getContext('2d');
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+        setFields(fields.map(f => ({ ...f, x: viewport.width / 2, y: viewport.height / 2 })));
+      } catch (error) { alert("Gagal membaca preview PDF."); }
     }
   };
 
   const handleCanvasClick = (e) => {
+    if (interaction.mode) return;
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
-    const pdfY = canvas.height - clickY;
-
-    setFields(fields.map(field => 
-      field.id === activeFieldId ? { ...field, x: Math.round(clickX), y: Math.round(pdfY) } : field
-    ));
+    const pdfY = canvas.height - ((e.clientY - rect.top) * scaleY);
+    setFields(fields.map(field => field.id === activeFieldId ? { ...field, x: Math.round((e.clientX - rect.left) * scaleX), y: Math.round(pdfY) } : field));
   };
 
-  const handleCsvUpload = (e) => {
-    const file = e.target.files[0];
-    Papa.parse(file, {
-      header: true, skipEmptyLines: true,
-      complete: (results) => {
-        setHeaders(results.meta.fields);
-        setCsvData(results.data);
-        if (results.meta.fields.length > 0) {
-          setFields(fields.map(f => ({ ...f, colName: results.meta.fields[0] })));
-        }
-      },
-    });
-  };
+  const handleCsvUpload = (e) => { Papa.parse(e.target.files[0], { header: true, skipEmptyLines: true, complete: (res) => { setHeaders(res.meta.fields); setCsvData(res.data); if (res.meta.fields.length > 0) setFields(fields.map(f => ({ ...f, colName: res.meta.fields[0] }))); }}); };
+  const handleFetchCsv = () => { if (!csvUrl) return; setIsFetchingCsv(true); Papa.parse(csvUrl, { download: true, header: true, skipEmptyLines: true, complete: (res) => { setHeaders(res.meta.fields); setCsvData(res.data); setIsFetchingCsv(false); setStatus('Data Live Berhasil dimuat!'); setTimeout(() => setStatus(''), 3000); }, error: () => { alert("Gagal fetch CSV."); setIsFetchingCsv(false); }}); };
+  const handleFontUpload = async (e) => { const files = Array.from(e.target.files); if (files.length === 0) return; const newFonts = []; for (const file of files) { newFonts.push({ label: file.name, value: file.name, bytes: await file.arrayBuffer(), isCustom: true }); } setCustomFonts([...customFonts, ...newFonts]); if (newFonts.length > 0) updateField(activeFieldId, 'fontValue', newFonts[0].value); };
 
-  const handleFetchCsv = () => {
-    if (!csvUrl) return;
-    setIsFetchingCsv(true);
-    
-    Papa.parse(csvUrl, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        setHeaders(results.meta.fields);
-        setCsvData(results.data);
-        if (results.meta.fields.length > 0) {
-          setFields(fields.map(f => ({ ...f, colName: results.meta.fields[0] })));
-        }
-        setIsFetchingCsv(false);
-        setStatus(`Live CSV berhasil dimuat! (${results.data.length} baris)`);
-        setTimeout(() => setStatus(''), 4000);
-      },
-      error: (err) => {
-        console.error(err);
-        alert("Gagal mengambil data. Pastikan URL valid dan merupakan format CSV.");
-        setIsFetchingCsv(false);
-      }
-    });
-  };
+  const handleCellChange = (idx, col, val) => { const newData = [...csvData]; newData[idx] = { ...newData[idx], [col]: val }; setCsvData(newData); };
+  const handleAddRow = () => { if (headers.length === 0) return; const nr = {}; headers.forEach(h => nr[h] = ''); setCsvData([...csvData, nr]); setTimeout(() => { const tc = document.getElementById('csv-table-container'); if(tc) tc.scrollTop = tc.scrollHeight; }, 100); };
+  const handleDeleteRow = (idx) => { if (csvData.length <= 1) return alert("Minimal 1 baris!"); setCsvData(prev => prev.filter((_, i) => i !== idx)); };
+  const handleExportCsv = () => { if (csvData.length === 0) return; saveAs(new Blob([Papa.unparse(csvData)], { type: 'text/csv;charset=utf-8;' }), 'Data_Peserta_Updated.csv'); setStatus('✅ CSV Berhasil disimpan!'); setTimeout(() => setStatus(''), 3000); };
+  const filteredCsvData = csvData.map((row, index) => ({ ...row, _originalIndex: index })).filter(row => !searchTerm || headers.some(h => String(row[h] || '').toLowerCase().includes(searchTerm.toLowerCase())));
 
-  // Logic Tabel CSV
-  const handleCellChange = (rowIndex, column, value) => {
-    const newData = [...csvData];
-    newData[rowIndex] = { ...newData[rowIndex], [column]: value };
-    setCsvData(newData);
-  };
-
-  const handleAddRow = () => {
-    if (headers.length === 0) return;
-    const newRow = {};
-    headers.forEach(header => {
-      newRow[header] = ''; 
-    });
-    setCsvData([...csvData, newRow]);
-    
-    setTimeout(() => {
-      const tableContainer = document.getElementById('csv-table-container');
-      if (tableContainer) tableContainer.scrollTop = tableContainer.scrollHeight;
-    }, 100);
-  };
-
-  const handleDeleteRow = (indexToRemove) => {
-    // Tambahkan pengecekan jumlah baris di sini
-    if (csvData.length <= 1) {
-      alert("Tidak bisa dihapus! Minimal harus ada 1 baris data peserta.");
-      return; // Hentikan fungsi agar baris terakhir tidak terhapus
-    }
-    
-    setCsvData(prevData => prevData.filter((_, index) => index !== indexToRemove));
-  };
-
-  const handleExportCsv = () => {
-    if (csvData.length === 0) return;
-    const csvString = Papa.unparse(csvData);
-    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-    saveAs(blob, 'Data_Peserta_Updated.csv');
-    
-    setStatus('✅ CSV Berhasil disimpan!');
-    setTimeout(() => setStatus(''), 3000);
-  };
-
-  const handleFontUpload = async (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length === 0) return;
-    
-    const newFonts = [];
-    for (const file of files) {
-      const arrayBuffer = await file.arrayBuffer();
-      newFonts.push({ label: file.name, value: file.name, bytes: arrayBuffer, isCustom: true });
-    }
-    setCustomFonts([...customFonts, ...newFonts]);
-    if (newFonts.length > 0) updateField(activeFieldId, 'fontValue', newFonts[0].value);
-  };
-
-  // Logic Manajemen Fields (Teks)
   const addField = () => {
-    const newField = { 
-      id: Date.now(), colName: headers[0] || '', 
-      x: pdfDimensions.width / 2 || 100, y: pdfDimensions.height / 2 || 100, 
-      size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000'
-    };
-    setFields([...fields, newField]);
-    setActiveFieldId(newField.id);
+    const nf = { id: Date.now(), colName: headers[0] || '', x: pdfDimensions.width / 2 || 100, y: pdfDimensions.height / 2 || 100, size: 40, fontValue: StandardFonts.HelveticaBold, color: '#000000', scaleX: 1, scaleY: 1, rotate: 0, lockRatio: true };
+    setFields([...fields, nf]); setActiveFieldId(nf.id);
   };
-
-  const removeField = (id) => {
-    if (fields.length === 1) return alert("Minimal harus ada 1 teks!");
-    const newFields = fields.filter(f => f.id !== id);
-    setFields(newFields);
-    if (activeFieldId === id) setActiveFieldId(newFields[0].id);
-  };
-
+  
+  const removeField = (id) => { if (fields.length === 1) return alert("Minimal 1 teks!"); const nf = fields.filter(f => f.id !== id); setFields(nf); if (activeFieldId === id) setActiveFieldId(nf[0].id); };
+  
   const updateField = (id, key, value) => {
-    setFields(fields.map(f => f.id === id ? { ...f, [key]: value } : f));
-  };
-
-  const exportConfig = () => {
-    const configToSave = fields.map(f => ({
-      colName: f.colName, x: f.x, y: f.y, size: f.size,
-      fontValue: typeof f.fontValue === 'string' ? f.fontValue : 'HelveticaBold', color: f.color
-    }));
-    const blob = new Blob([JSON.stringify(configToSave, null, 2)], { type: 'application/json' });
-    saveAs(blob, 'preset-sertifikat.json');
-  };
-
-  const importConfig = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const loadedData = JSON.parse(event.target.result);
-        const restoredFields = loadedData.map((f, index) => ({
-          id: Date.now() + index, colName: f.colName || '',
-          x: f.x || 100, y: f.y || 100, size: f.size || 40,
-          fontValue: f.fontValue || StandardFonts.HelveticaBold, color: f.color || '#000000'
-        }));
-        setFields(restoredFields);
-        if (restoredFields.length > 0) setActiveFieldId(restoredFields[0].id);
-        setStatus('Preset berhasil dimuat!');
-        setTimeout(() => setStatus(''), 3000);
-      } catch (error) { alert("File preset tidak valid!"); }
-    };
-    reader.readAsText(file);
-    e.target.value = null; 
-  };
-
-  // --- FITUR BARU: Generate hanya 1 baris pertama untuk Preview ---
-  const handlePreviewSingle = async () => {
-    if (!templateFile || csvData.length === 0) return alert("Upload template & CSV dulu!");
-    setStatus('Membuat Preview...');
-    
-    try {
-      // Cari baris pertama yang datanya tidak kosong
-      const firstValidRow = csvData.find(row => row[fields[0]?.colName] && row[fields[0]?.colName].trim() !== '');
-      if (!firstValidRow) throw new Error("Tidak ada data peserta yang valid untuk di-preview.");
-
-      const templateArrayBuffer = await templateFile.arrayBuffer();
-      const pdfDoc = await PDFDocument.load(templateArrayBuffer);
-      pdfDoc.registerFontkit(fontkit);
-      const firstPage = pdfDoc.getPages()[0];
-      const embeddedFontsCache = {};
-
-      for (const field of fields) {
-        const textValue = firstValidRow[field.colName];
-        if (!textValue) continue;
-
-        let currentFont;
-        const isCustom = customFonts.find(f => f.value === field.fontValue);
-
-        if (isCustom) {
-          if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(isCustom.bytes);
-          currentFont = embeddedFontsCache[field.fontValue];
-        } else {
-          if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(field.fontValue);
-          currentFont = embeddedFontsCache[field.fontValue];
+    setFields(fields.map(f => {
+      if (f.id === id) {
+        const finalValue = ['scaleX', 'scaleY', 'rotate', 'size', 'x', 'y'].includes(key) ? Number(value) : value;
+        const newField = { ...f, [key]: key === 'lockRatio' ? value : finalValue };
+        if (newField.lockRatio) {
+          if (key === 'scaleX') newField.scaleY = finalValue;
+          if (key === 'scaleY') newField.scaleX = finalValue;
         }
-
-        const textWidth = currentFont.widthOfTextAtSize(textValue, Number(field.size));
-        const finalX = Number(field.x) - (textWidth / 2);
-        const { r, g, b } = hexToRgbPdf(field.color);
-
-        firstPage.drawText(textValue, {
-          x: finalX, y: Number(field.y), size: Number(field.size),
-          font: currentFont, color: rgb(r, g, b),
-        });
+        return newField;
       }
-      
-      // Simpan PDF sebagai file sementara di memory browser (Blob)
-      const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-      
-      // Buka pop-up modal dan tampilkan PDF-nya
-      setPreviewPdfUrl(url);
-      setIsPreviewModalOpen(true);
-      setStatus('');
-    } catch (error) {
-      console.error(error);
-      setStatus('Error: ' + error.message);
+      return f;
+    }));
+  };
+
+  const exportConfig = () => saveAs(new Blob([JSON.stringify(fields, null, 2)], { type: 'application/json' }), 'preset-sertifikat.json');
+  const importConfig = (e) => { const reader = new FileReader(); reader.onload = (ev) => { try { const loaded = JSON.parse(ev.target.result).map((f, i) => ({ ...f, id: Date.now() + i, scaleX: f.scaleX ?? 1, scaleY: f.scaleY ?? 1, rotate: f.rotate ?? 0, lockRatio: f.lockRatio ?? true })); setFields(loaded); if (loaded.length > 0) setActiveFieldId(loaded[0].id); setStatus('Preset dimuat!'); setTimeout(() => setStatus(''), 3000); } catch (err) { alert("Preset tidak valid!"); } }; if(e.target.files[0]) reader.readAsText(e.target.files[0]); e.target.value = null; };
+
+  const preparePdfDoc = async () => {
+    const isImg = templateFile.type.startsWith('image/'); let pdfDoc, firstPage;
+    if (isImg) {
+      pdfDoc = await PDFDocument.create(); const imgBytes = await templateFile.arrayBuffer();
+      const embeddedImg = templateFile.type === 'image/png' ? await pdfDoc.embedPng(imgBytes) : await pdfDoc.embedJpg(imgBytes);
+      firstPage = pdfDoc.addPage([embeddedImg.width, embeddedImg.height]);
+      firstPage.drawImage(embeddedImg, { x: 0, y: 0, width: embeddedImg.width, height: embeddedImg.height });
+    } else {
+      pdfDoc = await PDFDocument.load(await templateFile.arrayBuffer()); firstPage = pdfDoc.getPages()[0];
+    }
+    pdfDoc.registerFontkit(fontkit); return { pdfDoc, firstPage };
+  };
+
+  const drawFieldsOnPage = async (pdfDoc, page, row, embeddedFontsCache) => {
+    for (const field of fields) {
+      const val = row[field.colName]; if (!val) continue;
+      const isCst = customFonts.find(f => f.value === field.fontValue);
+      if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = isCst ? await pdfDoc.embedFont(isCst.bytes) : await pdfDoc.embedFont(field.fontValue);
+      const font = embeddedFontsCache[field.fontValue];
+      const tw = font.widthOfTextAtSize(val, Number(field.size));
+      const finalX = Number(field.x) - ((tw * Number(field.scaleX || 1)) / 2);
+      const { r, g, b } = hexToRgbPdf(field.color);
+      page.drawText(val, { x: finalX, y: Number(field.y), size: Number(field.size), font, color: rgb(r, g, b), rotate: degrees(Number(field.rotate || 0)), xScale: Number(field.scaleX || 1), yScale: Number(field.scaleY || 1) });
     }
   };
 
-  // Logic Generate PDF Utama
-  const generateCertificates = async () => {
-    if (!templateFile || csvData.length === 0) return alert("Upload template & CSV dulu!");
-    setStatus('Sedang Memproses...');
-    const zip = new JSZip();
-    const templateArrayBuffer = await templateFile.arrayBuffer();
+  // FITUR BARU: Konversi file PDF dari PDF-Lib ke JPG/PNG via PDF.js rendering
+  const pdfToImageBlob = async (pdfBytes, format) => {
+    const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+    
+    // Scale 2.0 untuk kualitas resolusi tinggi (High-Res)
+    const viewport = page.getViewport({ scale: 2.0 });
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
 
+    // Tambahkan background putih agar JPG tidak menjadi hitam jika template transparan
+    if (format === 'jpeg') {
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        resolve(blob);
+      }, `image/${format}`, 1.0); // 1.0 adalah kualitas tertinggi
+    });
+  };
+
+  const handlePreviewSingle = async () => {
+    if (!templateFile || csvData.length === 0) return alert("Siapkan template dan CSV!"); 
+    setStatus('Membuat Preview...');
+    try {
+      const row = csvData.find(r => r[fields[0]?.colName] && r[fields[0]?.colName].trim() !== ''); if(!row) throw new Error("CSV kosong.");
+      const { pdfDoc, firstPage } = await preparePdfDoc(); 
+      await drawFieldsOnPage(pdfDoc, firstPage, row, {});
+      
+      const pdfBytes = await pdfDoc.save();
+      
+      if (exportFormat === 'pdf') {
+        setPreviewUrl(URL.createObjectURL(new Blob([pdfBytes], { type: 'application/pdf' }))); 
+      } else {
+        const imgBlob = await pdfToImageBlob(pdfBytes, exportFormat);
+        setPreviewUrl(URL.createObjectURL(imgBlob)); 
+      }
+      
+      setIsPreviewModalOpen(true); 
+      setStatus('');
+    } catch (e) { setStatus('Error preview.'); }
+  };
+
+  const generateCertificates = async () => {
+    if (!templateFile || csvData.length === 0) return alert("Siapkan file!"); 
+    setStatus('Sedang Memproses (Mungkin memakan waktu untuk format Gambar)...'); 
+    const zip = new JSZip();
     try {
       for (let i = 0; i < csvData.length; i++) {
-        const row = csvData[i];
+        const row = csvData[i]; if (!row[fields[0]?.colName] || row[fields[0]?.colName].trim() === '') continue;
+        const { pdfDoc, firstPage } = await preparePdfDoc(); 
+        await drawFieldsOnPage(pdfDoc, firstPage, row, {});
         
-        // Lewati baris yang kosong (misal akibat klik 'Tambah Baris' tapi belum diisi)
-        if (!row[fields[0]?.colName] || row[fields[0]?.colName].trim() === '') continue;
-
-        const primaryFileName = row[fields[0]?.colName] || `Sertifikat_${i+1}`; 
-        const pdfDoc = await PDFDocument.load(templateArrayBuffer);
-        pdfDoc.registerFontkit(fontkit);
-        const firstPage = pdfDoc.getPages()[0];
-        const embeddedFontsCache = {};
-
-        for (const field of fields) {
-          const textValue = row[field.colName];
-          if (!textValue) continue;
-
-          let currentFont;
-          const isCustom = customFonts.find(f => f.value === field.fontValue);
-
-          if (isCustom) {
-            if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(isCustom.bytes);
-            currentFont = embeddedFontsCache[field.fontValue];
-          } else {
-            if (!embeddedFontsCache[field.fontValue]) embeddedFontsCache[field.fontValue] = await pdfDoc.embedFont(field.fontValue);
-            currentFont = embeddedFontsCache[field.fontValue];
-          }
-
-          const textWidth = currentFont.widthOfTextAtSize(textValue, Number(field.size));
-          const finalX = Number(field.x) - (textWidth / 2);
-          const { r, g, b } = hexToRgbPdf(field.color);
-
-          firstPage.drawText(textValue, {
-            x: finalX, y: Number(field.y), size: Number(field.size),
-            font: currentFont, color: rgb(r, g, b),
-          });
-        }
         const pdfBytes = await pdfDoc.save();
-        zip.file(`${primaryFileName.replace(/[^a-z0-9]/gi, '_')}.pdf`, pdfBytes);
+        const baseFileName = row[fields[0].colName].replace(/[^a-z0-9]/gi, '_');
+        
+        if (exportFormat === 'pdf') {
+          zip.file(`${baseFileName}.pdf`, pdfBytes);
+        } else {
+          // Proses rendering ke PNG/JPG
+          const imgBlob = await pdfToImageBlob(pdfBytes, exportFormat);
+          const ext = exportFormat === 'jpeg' ? 'jpg' : 'png';
+          zip.file(`${baseFileName}.${ext}`, imgBlob);
+        }
       }
-      const content = await zip.generateAsync({ type: 'blob' });
-      saveAs(content, 'sertifikat-batch.zip');
-      setStatus('Selesai! File terunduh.');
+      saveAs(await zip.generateAsync({ type: 'blob' }), 'Sertifikat_Batch.zip'); 
+      setStatus('Selesai!'); 
       setTimeout(() => setStatus(''), 5000);
-    } catch (error) {
-      console.error(error);
-      setStatus('Error: ' + error.message);
-    }
+    } catch (e) { console.error(e); setStatus('Error generate.'); }
   };
 
-  // --- LOGIKA PENCARIAN (FIND) ---
-  // Kita sisipkan _originalIndex agar saat diedit/dihapus, data yang diubah tetap data aslinya
-  const filteredCsvData = csvData
-    .map((row, index) => ({ ...row, _originalIndex: index }))
-    .filter(row => {
-      if (!searchTerm) return true;
-      // Cek apakah ada nilai di kolom manapun yang cocok dengan kata kunci
-      return headers.some(h => 
-        String(row[h] || '').toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    });
-
-  // --- UI RENDERING ---
   return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-6 lg:p-8 font-sans text-slate-800 w-full overflow-x-hidden">
-      
-      {/* Header Aplikasi */}
-      <div className="w-full mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Bulk Certificate App</h1>
-          <p className="text-slate-500 mt-1">Otomatisasi pembuatan sertifikat massal dengan mudah.</p>
-        </div>
+    <div className="min-h-screen bg-slate-50 p-4 font-sans text-slate-800">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         
-        <button 
-          onClick={handleClearAll} 
-          className="bg-rose-100 text-rose-600 px-4 py-2 rounded-lg font-bold hover:bg-rose-200 hover:text-rose-700 transition-colors flex items-center shadow-sm"
-        >
-          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-          Bersihkan Semua
-        </button>
-      </div>
+        {/* KOLOM KIRI */}
+        <div className="lg:col-span-5 bg-white p-6 rounded-lg shadow-sm">
+          <h1 className="text-4xl font-extrabold text-[#1a202c] mb-6">Bulk Certificate App</h1>
 
-      <div className="w-full grid grid-cols-1 lg:grid-cols-12 2xl:grid-cols-12 gap-6 items-start">
-        
-        {/* PANEL KIRI: Upload & Config */}
-        <div className="lg:col-span-4 2xl:col-span-3 bg-white p-5 lg:p-6 rounded-2xl shadow-sm border border-slate-200">
-          
-          <div className="space-y-4 mb-8 pb-6 border-b border-slate-100">
-            <h2 className="font-bold text-lg text-slate-800 mb-2">1. Siapkan File</h2>
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">Upload Template (PDF)</label>
-              <input type="file" accept="application/pdf" onChange={handleTemplateUpload} 
-                className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer border border-slate-200 rounded-lg"/>
+          <div className="space-y-4 mb-6">
+            <div><label className="block text-sm font-semibold mb-1">1. Upload Template (PDF/PNG/JPG)</label><input type="file" accept=".pdf,image/png,image/jpeg,image/jpg" onChange={handleTemplateUpload} className="w-full text-sm file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-blue-50 file:text-blue-700 border border-slate-200 rounded p-1"/></div>
+            <div><label className="block text-sm font-semibold mb-1">2. Upload Data (CSV)</label><input type="file" accept=".csv" onChange={handleCsvUpload} className="w-full text-sm file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-green-50 file:text-green-700 border border-slate-200 rounded p-1 mb-2"/>
+              <div className="flex gap-2 items-center"><input type="url" placeholder="URL Google Sheets CSV..." value={csvUrl} onChange={(e) => setCsvUrl(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm outline-none" /><button onClick={handleFetchCsv} disabled={isFetchingCsv} className="bg-[#0f9d58] text-white px-4 py-2 rounded text-sm font-bold shadow-sm">{isFetchingCsv ? '...' : 'Live'}</button></div>
             </div>
-            
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">Sumber Data Peserta (CSV)</label>
-              <input type="file" accept=".csv" onChange={handleCsvUpload} 
-                className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer border border-slate-200 rounded-lg mb-2"/>
-              
-              <div className="relative flex py-2 items-center">
-                <div className="flex-grow border-t border-slate-200"></div>
-                <span className="flex-shrink-0 mx-4 text-slate-400 text-xs font-bold uppercase">Atau URL Live</span>
-                <div className="flex-grow border-t border-slate-200"></div>
-              </div>
-
-              <div className="flex gap-2">
-                <input 
-                  type="url" 
-                  placeholder="Link Google Sheets CSV..." 
-                  value={csvUrl}
-                  onChange={(e) => setCsvUrl(e.target.value)}
-                  className="w-full p-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" 
-                />
-                <button 
-                  onClick={handleFetchCsv}
-                  disabled={isFetchingCsv || !csvUrl}
-                  className="bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:bg-slate-300 whitespace-nowrap transition-colors"
-                >
-                  {isFetchingCsv ? 'Menarik...' : 'Ambil Live'}
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1 mt-4">Upload Font (.ttf/.otf)</label>
-              <input type="file" accept=".ttf,.otf" multiple onChange={handleFontUpload} 
-                className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100 cursor-pointer border border-slate-200 rounded-lg"/>
-            </div>
+            <div><label className="block text-sm font-semibold mb-1">3. Upload Font (.ttf/.otf)</label><input type="file" accept=".ttf,.otf" multiple onChange={handleFontUpload} className="w-full text-sm file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-purple-50 file:text-purple-700 border border-slate-200 rounded p-1"/></div>
           </div>
 
           {headers.length > 0 && (
-            <div className="mb-8">
-              <div className="flex flex-col 2xl:flex-row justify-between 2xl:items-center mb-4 gap-3">
-                <h2 className="font-bold text-lg text-slate-800">2. Pengaturan Teks</h2>
-                
-                <div className="flex flex-wrap gap-2">
-                  <label className="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded-lg text-sm font-semibold hover:bg-slate-50 cursor-pointer transition-colors shadow-sm text-center flex-1 2xl:flex-none">
-                    Load
-                    <input type="file" accept=".json" onChange={importConfig} className="hidden" />
-                  </label>
-                  <button onClick={exportConfig} className="bg-slate-800 text-white px-3 py-1.5 rounded-lg text-sm font-semibold hover:bg-slate-900 transition-colors shadow-sm flex-1 2xl:flex-none">
-                    Simpan
-                  </button>
-                  <button onClick={addField} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors shadow-sm flex items-center justify-center w-full 2xl:w-auto mt-1 2xl:mt-0">
-                    + Teks
-                  </button>
+            <div className="mb-6">
+              <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+                <h2 className="font-bold text-sm">Pengaturan<br/>Teks</h2>
+                <div className="flex gap-2">
+                  <label className="bg-slate-50 border border-slate-200 text-slate-700 px-3 py-2 rounded text-xs font-bold cursor-pointer text-center">Load<br/>Preset<input type="file" accept=".json" onChange={importConfig} className="hidden" /></label>
+                  <button onClick={exportConfig} className="bg-[#1a202c] text-[#0f9d58] px-3 py-2 rounded text-xs font-bold text-center">Simpan<br/>Preset</button>
+                  <button onClick={addField} className="bg-[#1a202c] text-[#4285f4] px-4 py-2 rounded text-xs font-bold text-center">+ Tambah<br/>Teks</button>
                 </div>
               </div>
 
-              <div className="space-y-4 max-h-[40vh] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="space-y-4">
                 {fields.map((field, index) => (
-                  <div 
-                    key={field.id} 
-                    onClick={() => setActiveFieldId(field.id)}
-                    className={`p-4 xl:p-5 rounded-xl border-2 transition-all duration-200 cursor-pointer relative overflow-hidden
-                      ${activeFieldId === field.id 
-                        ? 'border-blue-500 bg-blue-50/40 shadow-md ring-1 ring-blue-500' 
-                        : 'border-slate-200 bg-white hover:border-blue-300 shadow-sm'}`}
-                  >
-                    {activeFieldId === field.id && <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>}
+                  <div key={field.id} onClick={() => setActiveFieldId(field.id)} className={`p-4 rounded border-2 transition-all cursor-pointer ${activeFieldId === field.id ? 'border-blue-500 bg-blue-50/10' : 'border-slate-200 bg-white'}`}>
+                    <div className="flex justify-between items-center mb-3"><span className="font-bold text-sm">Teks #{index + 1} {activeFieldId === field.id && '(Aktif)'}</span><button onClick={(e) => { e.stopPropagation(); removeField(field.id); }} className="bg-[#1a202c] text-rose-500 text-xs font-bold px-3 py-1.5 rounded">Hapus</button></div>
+                    
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Kolom Data</label><select value={field.colName} onChange={(e) => updateField(field.id, 'colName', e.target.value)} className="w-full p-1.5 bg-slate-50 border border-slate-200 rounded text-sm outline-none"><option value="">-- Pilih --</option>{headers.map(h => <option key={h} value={h}>{h}</option>)}</select></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Pilih Font</label><select value={field.fontValue} onChange={(e) => updateField(field.id, 'fontValue', e.target.value)} className="w-full p-1.5 bg-slate-50 border border-slate-200 rounded text-sm outline-none"><optgroup label="Standar">{STANDARD_FONTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}</optgroup>{customFonts.length > 0 && <optgroup label="Custom">{customFonts.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}</optgroup>}</select></div>
+                    </div>
+                    
+                    <div className="grid grid-cols-4 gap-2 mb-3">
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Warna</label><input type="color" value={field.color} onChange={(e) => updateField(field.id, 'color', e.target.value)} className="w-full h-8 cursor-pointer rounded border border-slate-200" /></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Ukuran</label><input type="number" value={field.size} onChange={(e) => updateField(field.id, 'size', e.target.value)} className="w-full p-1.5 border border-slate-200 bg-slate-50 rounded text-sm outline-none" /></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">X</label><input type="number" value={field.x} readOnly className="w-full p-1.5 border border-slate-200 bg-slate-200 rounded text-sm" /></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Y</label><input type="number" value={field.y} readOnly className="w-full p-1.5 border border-slate-200 bg-slate-200 rounded text-sm" /></div>
+                    </div>
 
-                    <div className="flex justify-between items-center mb-4 pl-2">
-                      <span className="font-bold text-sm text-slate-800">
-                        Teks #{index + 1} {activeFieldId === field.id && <span className="text-blue-600 text-xs ml-1 bg-blue-100 px-2 py-0.5 rounded-full">Aktif</span>}
-                      </span>
-                      <button onClick={(e) => { e.stopPropagation(); removeField(field.id); }} className="text-rose-500 text-xs font-semibold hover:text-rose-700 bg-rose-50 px-2 py-1 rounded-md transition-colors">
-                        Hapus
-                      </button>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Scale X</label><input type="number" step="0.1" value={field.scaleX ?? 1} onChange={(e) => updateField(field.id, 'scaleX', e.target.value)} className="w-full p-1.5 border border-slate-200 bg-slate-50 rounded text-sm outline-none text-center" /></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Scale Y</label><input type="number" step="0.1" value={field.scaleY ?? 1} onChange={(e) => updateField(field.id, 'scaleY', e.target.value)} className="w-full p-1.5 border border-slate-200 bg-slate-50 rounded text-sm outline-none text-center" /></div>
+                      <div><label className="block text-[11px] text-slate-500 mb-1">Rotate (°)</label><input type="number" value={field.rotate ?? 0} onChange={(e) => updateField(field.id, 'rotate', e.target.value)} className="w-full p-1.5 border border-slate-200 bg-slate-50 rounded text-sm outline-none text-center" /></div>
                     </div>
-                    
-                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 mb-3 pl-2">
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">Kolom Data CSV</label>
-                        <select className="w-full p-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:ring-2 focus:ring-blue-500 outline-none" 
-                          value={field.colName} onChange={(e) => updateField(field.id, 'colName', e.target.value)}>
-                          <option value="">-- Pilih Kolom --</option>
-                          {headers.map(h => <option key={h} value={h}>{h}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">Pilih Font</label>
-                        <select className="w-full p-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:ring-2 focus:ring-blue-500 outline-none" 
-                          value={field.fontValue} onChange={(e) => updateField(field.id, 'fontValue', e.target.value)}>
-                          <optgroup label="Standar">
-                            {STANDARD_FONTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-                          </optgroup>
-                          {customFonts.length > 0 && (
-                            <optgroup label="Custom Fonts">
-                              {customFonts.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-                            </optgroup>
-                          )}
-                        </select>
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-4 gap-2 xl:gap-3 pl-2">
-                      <div className="col-span-1">
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">Warna</label>
-                        <input type="color" value={field.color} onChange={(e) => updateField(field.id, 'color', e.target.value)} 
-                          className="w-full h-[38px] p-0.5 border border-slate-300 rounded-lg cursor-pointer bg-white" />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">Ukuran</label>
-                        <input type="number" value={field.size} onChange={(e) => updateField(field.id, 'size', e.target.value)} 
-                          className="w-full p-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:ring-2 focus:ring-blue-500 outline-none" />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">X</label>
-                        <input type="number" value={field.x} readOnly 
-                          className="w-full p-2 border border-slate-200 rounded-lg bg-slate-100 text-sm text-slate-500 cursor-not-allowed font-mono px-1" />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 mb-1">Y</label>
-                        <input type="number" value={field.y} readOnly 
-                          className="w-full p-2 border border-slate-200 rounded-lg bg-slate-100 text-sm text-slate-500 cursor-not-allowed font-mono px-1" />
-                      </div>
+
+                    <div className="flex items-center mt-3">
+                      <input type="checkbox" id={`lockRatio-${field.id}`} checked={field.lockRatio ?? true} onChange={(e) => updateField(field.id, 'lockRatio', e.target.checked)} className="mr-2 cursor-pointer w-3.5 h-3.5 accent-blue-600"/>
+                      <label htmlFor={`lockRatio-${field.id}`} className="text-xs font-bold text-slate-600 cursor-pointer select-none">Lock Aspect Ratio</label>
                     </div>
                   </div>
                 ))}
@@ -544,233 +359,119 @@ function App() {
             </div>
           )}
 
-          <div className="mt-6 flex flex-col xl:flex-row gap-3">
-            <button 
-              onClick={handlePreviewSingle} 
-              disabled={status === 'Sedang Memproses...' || status === 'Membuat Preview...' || !templateFile || csvData.length === 0} 
-              className="w-full xl:w-2/5 bg-blue-100 text-blue-700 py-4 rounded-xl font-bold text-lg hover:bg-blue-200 transition-all disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed shadow-sm flex justify-center items-center"
-            >
-              👁️ Preview 1 Sample
-            </button>
-            <button 
-              onClick={generateCertificates} 
-              disabled={status === 'Sedang Memproses...' || status === 'Membuat Preview...' || !templateFile || csvData.length === 0} 
-              className="w-full xl:w-3/5 bg-slate-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-slate-800 transition-all disabled:bg-slate-300 disabled:cursor-not-allowed shadow-lg flex justify-center items-center"
-            >
-              {status === 'Sedang Memproses...' ? 'Memproses...' : '🚀 Generate ZIP'}
-            </button>
+          {/* OPSI EXPORT BARU */}
+          <div className="flex flex-col gap-2 mb-2">
+            <div className="flex items-center justify-between border border-slate-200 p-2 rounded bg-slate-50 mb-1">
+              <span className="text-sm font-bold text-slate-700 pl-2">Ekspor Sebagai:</span>
+              <select value={exportFormat} onChange={(e) => setExportFormat(e.target.value)} className="p-1.5 rounded border border-slate-300 text-sm bg-white font-bold outline-none cursor-pointer">
+                <option value="pdf">📄 File PDF</option>
+                <option value="jpeg">🖼️ Gambar JPG</option>
+                <option value="png">🖼️ Gambar PNG</option>
+              </select>
+            </div>
+
+            <div className="flex gap-2">
+              <button onClick={handlePreviewSingle} disabled={!templateFile || csvData.length === 0} className="w-1/3 bg-slate-100 border border-slate-300 text-slate-800 py-3 rounded font-bold text-sm hover:bg-slate-200">Preview</button>
+              <button onClick={generateCertificates} disabled={status.includes('Memproses') || !templateFile || csvData.length === 0} className="w-2/3 bg-[#1a202c] text-white py-3 rounded font-bold text-sm hover:bg-black">Generate & Download ZIP</button>
+            </div>
           </div>
-          {status && status !== 'Sedang Memproses...' && status !== 'Membuat Preview...' && (
-            <p className="mt-4 text-center text-sm font-semibold text-emerald-600 bg-emerald-50 py-2 rounded-lg border border-emerald-100">{status}</p>
-          )}
+          {status && <p className="text-center text-sm font-bold text-emerald-600 mt-2">{status}</p>}
         </div>
 
-        {/* PANEL KANAN: Live Preview */}
-        <div className="lg:col-span-8 2xl:col-span-9 bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center lg:sticky lg:top-8">
+        {/* KOLOM KANAN (Preview Canvas) */}
+        <div className="lg:col-span-7 bg-white p-6 rounded-lg shadow-sm flex flex-col items-center select-none">
+          <h2 className="font-bold text-sm text-slate-800 mb-4">Live Preview</h2>
           
-          <div className="w-full flex justify-between items-center mb-4">
-            <h2 className="font-bold text-lg text-slate-800">Live Preview</h2>
-            {templateFile && <span className="text-xs font-semibold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100 shadow-sm animate-pulse">Klik area PDF untuk atur posisi</span>}
-          </div>
+          <div className="w-full border border-dashed border-slate-300 bg-slate-50 flex justify-center items-center min-h-[400px] p-2 overflow-auto relative">
+             {!templateFile && <span className="text-slate-400 text-sm">Upload template untuk melihat preview</span>}
+             
+             {templateFile && (
+               <div className="relative shadow-md bg-white">
+                 <canvas ref={canvasRef} onClick={handleCanvasClick} className="max-w-full h-auto" />
+                 
+                 {fields.map(field => {
+                   let previewFontFamily = 'sans-serif';
+                   if (typeof field.fontValue === 'string') {
+                     if (field.fontValue.includes('Times')) previewFontFamily = 'serif';
+                     if (field.fontValue.includes('Courier')) previewFontFamily = 'monospace';
+                   }
 
-          <div className="relative border border-slate-200 rounded-xl bg-slate-100 overflow-hidden w-full flex justify-center items-center shadow-inner" style={{ minHeight: '550px' }}>
-            {!templateFile && (
-              <div className="text-center p-6">
-                <svg className="mx-auto h-16 w-16 text-slate-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                <span className="text-slate-500 font-medium block text-lg">Area Kerja Kosong</span>
-                <span className="text-slate-400 text-sm mt-1">Silakan upload Template PDF di panel sebelah kiri.</span>
-              </div>
-            )}
-            
-            <div className="relative" style={{ width: '100%', maxWidth: pdfDimensions.width ? '100%' : 'auto' }}>
-              <canvas 
-                ref={canvasRef} 
-                onClick={handleCanvasClick} 
-                className={`max-w-full h-auto cursor-crosshair shadow-md bg-white ${!templateFile ? 'hidden' : 'block mx-auto'}`} 
-              />
-              
-              {templateFile && fields.map(field => {
-                let previewFontFamily = 'sans-serif';
-                if (typeof field.fontValue === 'string') {
-                  if (field.fontValue.includes('Times')) previewFontFamily = 'serif';
-                  if (field.fontValue.includes('Courier')) previewFontFamily = 'monospace';
-                }
+                   return (
+                     <div key={field.id} id={`field-overlay-${field.id}`} onMouseDown={(e) => onMouseDownMove(e, field)}
+                       className={`absolute whitespace-nowrap px-1 group ${activeFieldId === field.id ? 'ring-2 ring-blue-500 z-20 cursor-move bg-blue-50/10' : 'border border-transparent opacity-75 z-10 hover:border-slate-300 cursor-pointer'}`}
+                       style={{ 
+                         left: `${(field.x / pdfDimensions.width) * 100}%`, top: `${((pdfDimensions.height - field.y) / pdfDimensions.height) * 100}%`, 
+                         transform: `translate(-50%, -50%) rotate(${field.rotate || 0}deg) scale(${field.scaleX || 1}, ${field.scaleY || 1})`, transformOrigin: 'center center', 
+                         fontSize: `${field.size * (canvasRef.current?.offsetWidth / pdfDimensions.width || 1)}px`, 
+                         fontFamily: previewFontFamily, color: field.color 
+                       }}>
+                       
+                       {activeFieldId === field.id && (
+                         <><div onMouseDown={(e) => onMouseDownRotate(e, field)} className="absolute -top-8 left-1/2 -translate-x-1/2 w-4 h-4 bg-blue-500 rounded-full border-2 border-white cursor-pointer shadow-md" title="Tarik untuk memutar" /><div className="absolute -top-4 left-1/2 -translate-x-1/2 w-0.5 h-4 bg-blue-500" /></>
+                       )}
 
-                return (
-                  <div 
-                    key={field.id}
-                    className={`absolute pointer-events-none font-bold whitespace-nowrap px-1 transition-all duration-200
-                      ${activeFieldId === field.id 
-                        ? 'border-2 border-blue-500 shadow-sm bg-blue-50/20 z-10 scale-105' 
-                        : 'border border-transparent opacity-75 z-0 hover:border-slate-300 hover:opacity-100'}
-                    `}
-                    style={{
-                      left: `${(field.x / pdfDimensions.width) * 100}%`,
-                      top: `${((pdfDimensions.height - field.y) / pdfDimensions.height) * 100}%`,
-                      transform: 'translate(-50%, -50%)',
-                      fontSize: `${field.size * (canvasRef.current?.offsetWidth / pdfDimensions.width || 1)}px`,
-                      fontFamily: previewFontFamily,
-                      color: field.color
-                    }}
-                  >
-                    [ {field.colName || 'Teks Kosong'} ]
-                  </div>
-                )
-              })}
-            </div>
+                       <span className="font-bold pointer-events-none">[{field.colName || 'nama'}]</span>
+
+                       {activeFieldId === field.id && (
+                         <div onMouseDown={(e) => onMouseDownResize(e, field)} className="absolute -bottom-2 -right-2 w-4 h-4 bg-blue-500 rounded-full border-2 border-white cursor-nwse-resize shadow-md" title="Tarik untuk merubah skala" />
+                       )}
+                     </div>
+                   )
+                 })}
+               </div>
+             )}
           </div>
         </div>
       </div>
 
-      {/* --- PANEL BAWAH: Tabel CSV Editor --- */}
+      {/* KOLOM BAWAH (CSV Tabel) */}
       {csvData.length > 0 && (
-        <div className="w-full mt-6 bg-white p-5 lg:p-6 rounded-2xl shadow-sm border border-slate-200">
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-4">
-            <h2 className="font-bold text-lg text-slate-800">Tabel Editor Data CSV ({csvData.length} baris)</h2>
-            
-            <div className="flex flex-col md:flex-row flex-wrap gap-3 w-full md:w-auto items-center">
-              
-              {/* --- FITUR BARU: Input Search (Find) --- */}
-              <div className="relative w-full md:w-64">
-                <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                  <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                </div>
-                <input 
-                  type="text" 
-                  placeholder="Cari data peserta..." 
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-slate-50 focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none transition-all shadow-sm"
-                />
-              </div>
-
-              <div className="flex gap-2 w-full md:w-auto">
-                <button 
-                  onClick={handleAddRow}
-                  className="bg-blue-100 text-blue-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-200 transition-colors flex items-center shadow-sm flex-1 md:flex-none justify-center"
-                >
-                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
-                  Tambah Baris
-                </button>
-
-                <button 
-                  onClick={handleExportCsv}
-                  className="bg-emerald-100 text-emerald-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-200 transition-colors flex items-center shadow-sm flex-1 md:flex-none justify-center"
-                >
-                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                  Simpan CSV
-                </button>
-              </div>
+        <div className="max-w-7xl mx-auto mt-6 bg-white p-6 rounded-lg shadow-sm">
+          <div className="flex flex-col md:flex-row justify-between items-center mb-4 gap-4">
+            <h2 className="font-bold text-lg">CSV Editor <span className="text-sm font-normal text-slate-500">({csvData.length} baris)</span></h2>
+            <div className="flex gap-2 w-full md:w-auto">
+              <input type="text" placeholder="Cari..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="p-2 border border-slate-300 rounded text-sm w-full md:w-48 outline-none" />
+              <button onClick={handleAddRow} className="bg-blue-50 text-blue-600 px-3 py-2 rounded text-sm font-bold border border-blue-200">+ Baris</button>
+              <button onClick={handleExportCsv} className="bg-emerald-50 text-emerald-600 px-3 py-2 rounded text-sm font-bold border border-emerald-200">Simpan CSV</button>
             </div>
           </div>
           
-          <div id="csv-table-container" className="overflow-x-auto max-h-[400px] custom-scrollbar border border-slate-200 rounded-lg scroll-smooth">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
-              <thead className="bg-slate-100 sticky top-0 z-10 shadow-sm">
-                <tr>
-                  <th className="px-4 py-3 text-center font-bold text-slate-700 whitespace-nowrap w-12 border-r border-slate-200">No.</th>
-                  {headers.map((h, i) => (
-                    <th key={i} className="px-4 py-3 text-left font-bold text-slate-700 whitespace-nowrap">{h}</th>
-                  ))}
-                  <th className="px-4 py-3 text-center font-bold text-slate-700 whitespace-nowrap w-16">Aksi</th>
-                </tr>
+          <div id="csv-table-container" className="overflow-x-auto max-h-[300px] border border-slate-200 rounded">
+            <table className="min-w-full text-sm divide-y divide-slate-200">
+              <thead className="bg-slate-50 sticky top-0 z-10">
+                <tr><th className="px-3 py-2 text-center border-r">No</th>{headers.map(h => <th key={h} className="px-3 py-2 text-left border-r whitespace-nowrap">{h}</th>)}<th className="px-3 py-2 text-center">Aksi</th></tr>
               </thead>
-              <tbody className="bg-white divide-y divide-slate-100">
-                {/* --- UPDATE: Gunakan filteredCsvData, bukan csvData --- */}
-                {filteredCsvData.length > 0 ? (
-                  filteredCsvData.map((row, rowIndex) => (
-                    // Gunakan originalIndex sebagai patokan nomor dan handle action
-                    <tr key={row._originalIndex} className="hover:bg-slate-50 transition-colors group">
-                      <td className="px-4 py-2 text-slate-400 font-mono border-r border-slate-100 text-center">
-                        {row._originalIndex + 1}
-                      </td>
-                      
-                      {headers.map((h, colIndex) => (
-                        <td key={colIndex} className="p-0 border-r border-slate-100 relative min-w-[150px]">
-                          <input 
-                            type="text" 
-                            value={row[h] || ''} 
-                            // Pastikan mengirim row._originalIndex, bukan rowIndex urutan pencarian
-                            onChange={(e) => handleCellChange(row._originalIndex, h, e.target.value)}
-                            className="w-full h-full px-4 py-3 bg-transparent border-none outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white text-slate-700 transition-all"
-                            placeholder="Kosong..."
-                          />
-                        </td>
-                      ))}
-
-                      <td className="px-2 py-2 text-center align-middle border-l border-slate-100">
-                        <button 
-                          type="button"
-                          // Pastikan menghapus berdasarkan original index
-                          onClick={() => handleDeleteRow(row._originalIndex)}
-                          disabled={csvData.length <= 1}
-                          className={`p-2 rounded-lg transition-all ${
-                            csvData.length <= 1 
-                              ? 'text-slate-200 cursor-not-allowed'
-                              : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer'
-                          }`}
-                          title={csvData.length <= 1 ? "Minimal 1 baris data" : "Hapus baris ini"}
-                        >
-                          <svg className="w-5 h-5 mx-auto pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                          </svg>
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={headers.length + 2} className="px-4 py-8 text-center text-slate-500">
-                      Pencarian <b>"{searchTerm}"</b> tidak ditemukan.
-                    </td>
+              <tbody className="bg-white divide-y">
+                {filteredCsvData.map(row => (
+                  <tr key={row._originalIndex} className="hover:bg-slate-50">
+                    <td className="px-3 py-2 text-center text-slate-400 border-r">{row._originalIndex + 1}</td>
+                    {headers.map(h => (<td key={h} className="p-0 border-r min-w-[120px]"><input type="text" value={row[h] || ''} onChange={(e) => handleCellChange(row._originalIndex, h, e.target.value)} className="w-full p-2 bg-transparent outline-none focus:bg-white" /></td>))}
+                    <td className="px-2 py-1 text-center"><button onClick={() => handleDeleteRow(row._originalIndex)} disabled={csvData.length <= 1} className="text-rose-500 font-bold text-xs p-1">Hapus</button></td>
                   </tr>
-                )}
+                ))}
               </tbody>
             </table>
           </div>
-          <p className="text-xs font-semibold text-slate-500 mt-4 flex items-center">
-            <svg className="w-4 h-4 mr-1 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            Klik pada teks di dalam tabel untuk mengedit, tambah baris, hapus baris, atau gunakan fitur Cari untuk menemukan data.
-          </p>
         </div>
       )}
 
-{/* --- MODAL PREVIEW PDF ASLI --- */}
+      {/* MODAL PREVIEW SESUAI FORMAT */}
       {isPreviewModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 md:p-8">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-full max-h-[90vh] flex flex-col overflow-hidden">
-            
-            {/* Header Modal */}
-            <div className="flex justify-between items-center p-4 border-b border-slate-200 bg-slate-50">
-              <h3 className="font-bold text-lg text-slate-800 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                Preview Hasil Akhir PDF (Baris Pertama)
-              </h3>
-              <button 
-                onClick={() => {
-                  setIsPreviewModalOpen(false);
-                  URL.revokeObjectURL(previewPdfUrl); // Bersihkan cache browser
-                  setPreviewPdfUrl(null);
-                }}
-                className="bg-rose-100 text-rose-600 hover:bg-rose-200 px-4 py-2 rounded-lg transition-colors font-bold text-sm"
-              >
-                Tutup Preview
-              </button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="bg-white rounded-lg w-full max-w-4xl h-[85vh] flex flex-col">
+            <div className="flex justify-between p-3 border-b">
+              <h3 className="font-bold uppercase">Preview {exportFormat}</h3>
+              <button onClick={() => { setIsPreviewModalOpen(false); setPreviewUrl(null); }} className="text-rose-600 font-bold text-sm">Tutup</button>
             </div>
-
-            {/* Area Penampil PDF */}
-            <div className="flex-grow w-full bg-slate-200 p-2 md:p-6 overflow-hidden">
-              {previewPdfUrl ? (
-                <iframe 
-                  src={`${previewPdfUrl}#toolbar=0&navpanes=0`} 
-                  className="w-full h-full rounded-xl border border-slate-300 shadow-sm bg-white"
-                  title="PDF Preview"
-                />
+            <div className="flex-grow bg-slate-200 p-2 flex justify-center items-center overflow-auto">
+              {previewUrl && exportFormat === 'pdf' ? (
+                <iframe src={`${previewUrl}#toolbar=0`} className="w-full h-full bg-white rounded shadow-lg" title="Preview PDF" />
+              ) : previewUrl ? (
+                <img src={previewUrl} alt="Preview Ekspor Gambar" className="max-w-full max-h-full bg-white rounded shadow-lg object-contain" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-slate-500 font-semibold">Memuat PDF...</div>
+                <span className="text-slate-500 font-bold">Memuat Preview...</span>
               )}
             </div>
-
           </div>
         </div>
       )}
